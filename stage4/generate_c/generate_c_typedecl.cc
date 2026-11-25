@@ -198,12 +198,6 @@ class generate_datatypes_aliasid_c: fcall_visitor_c {
 
 generate_datatypes_aliasid_c *generate_datatypes_aliasid_c::singleton_ = NULL;
 
-
-
-
-
-
-
 /***************************************************************************************/
 /***************************************************************************************/
 /***************************************************************************************/
@@ -257,9 +251,10 @@ class generate_c_typedecl_c: public generate_c_base_and_typeid_c {
      */
     generate_c_base_and_typeid_c *generate_c_typeid;
 
-    
+
   public:
-    generate_c_typedecl_c(stage4out_c *s4o_ptr): generate_c_base_and_typeid_c(s4o_ptr), s4o_incl(*s4o_ptr) /*, generate_c_print_typename(s4o_ptr) */{
+    generate_c_typedecl_c(stage4out_c *s4o_ptr):
+        generate_c_base_and_typeid_c(s4o_ptr), s4o_incl(*s4o_ptr) {
       current_typedefinition = none_td;
       current_basetypedeclaration = none_bd;
       current_type_name = NULL;
@@ -308,6 +303,9 @@ class generate_c_typedecl_c: public generate_c_base_and_typeid_c {
 
       return NULL;
     }
+
+
+    /* Print the __IEC_types_enum value for a simple (leaf) type */
 
 
 /***************************/
@@ -457,9 +455,9 @@ void *visit(subrange_c *symbol) {
   switch (current_typedefinition) {
     case array_td:
       if (current_basetypedeclaration == arraysubrange_bd) {
-        s4o_incl.print("[");
+        s4o_incl.print("__DIM(");
         s4o_incl.print(symbol->dimension);
-        s4o_incl.print("]");
+        s4o_incl.print(")");
       }
       else
         symbol->lower_limit->accept(*this);  // always calls neg_integer_c or integer_c
@@ -542,36 +540,52 @@ void *visit(array_type_declaration_c *symbol) {
   // NOTE: remeber that symbol->array_spec_init may point to a derived_datatype_identifier_c, which is why we use symbol->array_spec_init->datatype instead!
   if (NULL == symbol->array_spec_init->datatype) ERROR;
   identifier_c *id = generate_datatypes_aliasid_c::create_id(symbol->array_spec_init->datatype);
-  
+
   /* NOTE  An array_type_declaration_c will be created in stage4 for each implicitly defined array,
    *       and this generate_c_typedecl_c will be called to define that array in C.
    *       However, every implictly defined array with the exact same parameters will be mapped
    *       to the same identifier (e.g: __ARRAY_OF_INT_33 where 33 is the number of elements in the array).
-   *       In order for the C compiler not to find the same datatype being defined two or more times, 
+   *       In order for the C compiler not to find the same datatype being defined two or more times,
    *       we will keep track of the array datatypes that have already been declared, and henceforth
    *       only declare arrays that have not been previously defined.
    */
-  if (datatypes_already_defined.find(id->value) != datatypes_already_defined.end())
-    goto end; // already defined. No need to define it again!!
-  datatypes_already_defined[id->value] = 1; // insert this datatype into the list of already defined arrays!
-  
-  current_typedefinition = array_td;
-  current_type_name = id;
+  if (datatypes_already_defined.find(id->value) == datatypes_already_defined.end()) {
+    datatypes_already_defined[id->value] = 1; // insert this datatype into the list of already defined arrays!
 
-  s4o_incl.print("__DECLARE_ARRAY_TYPE(");
-  current_type_name->accept(*generate_c_typeid);
-  s4o_incl.print(",");
-  symbol->array_spec_init->accept(*this); // always calls array_spec_init_c
-  s4o_incl.print(")\n");
+    current_typedefinition = array_td;
+    current_type_name = id;
 
-  current_type_name = NULL;
-  current_typedefinition = none_td;
+    symbol->array_spec_init->accept(*this); // always calls array_spec_init_c
+    s4o_incl.print(")\n");
 
-end:  
-  symbol                 ->anotations_map["generate_c_annotaton__implicit_type_id"] = id;
-  symbol->datatype       ->anotations_map["generate_c_annotaton__implicit_type_id"] = id;
-  symbol->array_spec_init->anotations_map["generate_c_annotaton__implicit_type_id"] = id; // probably not needed, bu let's play safe.
-  
+    current_type_name = NULL;
+    current_typedefinition = none_td;
+  }
+
+  /* For an explicitly named IEC array type (e.g. TYPE MC_REAL_ARRAY : ARRAY [1..6] OF LREAL; END_TYPE)
+   * we additionally declare a C alias that maps the IEC name onto the structural array datatype declared
+   * above. This keeps the original IEC name in the generated C, while remaining assignment-compatible with
+   * any structurally-identical array (both end up being the same underlying C type through the typedef).
+   *   The implicit-array path (generate_c_implicit_typedecl_c) reuses this visitor, but passes the structural
+   * id itself as the array 'identifier'. In that case there is no IEC name to preserve, so we skip the alias
+   * (which would otherwise generate an invalid 'typedef X X;' self-typedef) and annotate with the structural id.
+   */
+  if (std::string(get_datatype_info_c::get_id_str(symbol->identifier)) != std::string(id->value)) {
+    s4o_incl.print("__DECLARE_ARRAY_DERIVED_TYPE(");
+    symbol->identifier->accept(*generate_c_typeid); // the IEC name, e.g. MC_REAL_ARRAY
+    s4o_incl.print(",");
+    id->accept(*generate_c_typeid);                 // the structural datatype, e.g. __ARRAY_OF_LREAL_6
+    s4o_incl.print(")\n");
+
+    symbol                 ->anotations_map["generate_c_annotaton__implicit_type_id"] = symbol->identifier;
+    symbol->datatype       ->anotations_map["generate_c_annotaton__implicit_type_id"] = symbol->identifier;
+    symbol->array_spec_init->anotations_map["generate_c_annotaton__implicit_type_id"] = symbol->identifier; // probably not needed, bu let's play safe.
+  } else {
+    symbol                 ->anotations_map["generate_c_annotaton__implicit_type_id"] = id;
+    symbol->datatype       ->anotations_map["generate_c_annotaton__implicit_type_id"] = id;
+    symbol->array_spec_init->anotations_map["generate_c_annotaton__implicit_type_id"] = id; // probably not needed, bu let's play safe.
+  }
+
   return NULL;
 }
 
@@ -588,8 +602,14 @@ void *visit(array_spec_init_c *symbol) {
 /* ARRAY '[' array_subrange_list ']' OF non_generic_type_name */
 void *visit(array_specification_c *symbol) {
   TRACE("array_specification_c");
-  // The 2nd and 3rd argument of a call to the __DECLARE_ARRAY_TYPE macro!
-  symbol->non_generic_type_name->accept(/*generate_c_print_typename*/*generate_c_typeid);
+  symbol_c *elem_basetype = search_base_type_c::get_basetype_decl(symbol->non_generic_type_name);
+  bool elem_is_complex = (elem_basetype != NULL)
+      && (get_datatype_info_c::is_array(elem_basetype)
+       || get_datatype_info_c::is_structure(elem_basetype));
+  s4o_incl.print(elem_is_complex ? "__DECLARE_ARRAY_OF_COMPLEX_TYPE(" : "__DECLARE_ARRAY_TYPE(");
+  current_type_name->accept(*generate_c_typeid);
+  s4o_incl.print(",");
+  symbol->non_generic_type_name->accept(*generate_c_typeid);
   s4o_incl.print(",");
   current_basetypedeclaration = arraysubrange_bd;
   symbol->array_subrange_list->accept(*this); // always calls array_subrange_list_c, which the iterator_visitor_c base class will call subrange_c
@@ -741,11 +761,19 @@ void *visit(structure_element_declaration_list_c *symbol) {
 void *visit(structure_element_declaration_c *symbol) {
   TRACE("structure_element_declaration_c");
 
-  symbol->spec_init->accept(/*generate_c_print_typename*/*generate_c_typeid);
-  s4o_incl.print(" ");
-  symbol->structure_element_name->accept(*generate_c_typeid);
-  s4o_incl.print(";\n");
+  symbol_c *elem_type = spec_init_sperator_c::get_spec(symbol->spec_init);
+  symbol_c *elem_basetype = search_base_type_c::get_basetype_decl(elem_type);
+  bool elem_is_complex = (elem_basetype != NULL)
+      && (get_datatype_info_c::is_array(elem_basetype)
+       || get_datatype_info_c::is_structure(elem_basetype));
+
   s4o_incl.print(s4o_incl.indent_spaces);
+  s4o_incl.print(elem_is_complex ? DECLARE_COMPLEX_VAR : DECLARE_VAR);
+  s4o_incl.print("(");
+  elem_type->accept(*generate_c_typeid);
+  s4o_incl.print(",");
+  symbol->structure_element_name->accept(*generate_c_typeid);
+  s4o_incl.print(")\n");
 
   return NULL;
 }

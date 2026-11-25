@@ -265,9 +265,8 @@ __ANY_UINT(__iec_)
 #undef __iec_
 
 /******** [ANY_REAL]_TO_STRING   ************/ 
-#define __iec_(from_TYPENAME) __convert_type(from_TYPENAME, STRING, __real_to_string)
-__ANY_REAL(__iec_)
-#undef __iec_
+__convert_type(REAL, STRING, __real32_to_string)
+__convert_type(LREAL, STRING, __real_to_string)
 
 /******** [ANY_DATE]_TO_STRING   ************/ 
 __convert_type(DATE, STRING, __date_to_string)
@@ -293,9 +292,8 @@ __ANY_UINT(__iec_)
 #undef __iec_
 
 /******** STRING_TO_[ANY_REAL]   ************/ 
-#define __iec_(to_TYPENAME) __convert_type(STRING, to_TYPENAME, __string_to_real)
-__ANY_REAL(__iec_)
-#undef __iec_
+__convert_type(STRING, REAL, __string_to_real)
+__convert_type(STRING, LREAL, __string_to_lreal)
 
 /******** STRING_TO_[ANY_DATE]   ************/ 
 #define __iec_(to_TYPENAME) __convert_type(STRING, to_TYPENAME, __string_to_time)
@@ -341,6 +339,19 @@ static inline to_TYPENAME ___##BCD_TO_##to_TYPENAME##__##to_TYPENAME##__##from_T
 __ANY_NBIT(__to_anyuint_)
 #undef __iec_
 
+/* Clean up the type conversion generator helpers */
+#undef __convert_type
+#undef __convert_num_to_bool
+#undef __convert_time_to_bool
+#undef __to_anynum_
+#undef __to_anyint_
+#undef __to_anybit_
+#undef __to_anynbit_
+#undef __to_anysint_
+#undef __to_anyuint_
+#undef __to_anyreal_
+#undef __to_anydate_
+
 
 /***********************************/  
 /***********************************/  
@@ -349,6 +360,11 @@ __ANY_NBIT(__to_anyuint_)
 /***********************************/  
 
 /* workaround for va-args limitation on shorter than int params */
+/* Extensible functions take all their extensible operands through "...", and
+ * va_arg() reads each one as VA_ARGS_<type>, its type once default argument
+ * promotions applied. Callers cast operands to that type.
+ * Promotions must not apply to the last named parameter either, as va_start()
+ * behavior is undefined then: param_count is an UDINT. */
 #define VA_ARGS_REAL LREAL
 #define VA_ARGS_LREAL LREAL
 #define VA_ARGS_SINT DINT
@@ -370,16 +386,6 @@ __ANY_NBIT(__to_anyuint_)
 #define VA_ARGS_DATE DATE
 #define VA_ARGS_TOD TOD
 #define VA_ARGS_DT DT
-
-/* Older GCC's va_start expansion looks like a function call to the compiler,
- * which triggers -Wdouble-promotion when the last named argument is a REAL
- * (float). The promoted value is never used by va_start, so suppress the
- * diagnostic locally. */
-#define __VA_START(ap, last) \
-  _Pragma("GCC diagnostic push") \
-  _Pragma("GCC diagnostic ignored \"-Wdouble-promotion\"") \
-  va_start (ap, last); \
-  _Pragma("GCC diagnostic pop")
 
 
 #define __numeric(fname,TYPENAME, FUNC) \
@@ -496,20 +502,36 @@ __ANY_REAL(__acos)
 __ANY_REAL(__atan)
 
 
+/* Clean up the functions of one numeric variable generator helpers */
+#undef __numeric
+#undef __abs_signed
+#undef __abs_unsigned
+#undef __sqrt
+#undef __ln
+#undef __log
+#undef __exp
+#undef __sin
+#undef __cos
+#undef __tan
+#undef __asin
+#undef __acos
+#undef __atan
 
 /*****************************************************/
 /***   Table 24 - Standard arithmetic functions    ***/
 /*****************************************************/
 
 #define __arith_expand(fname,TYPENAME, OP)\
-static inline TYPENAME ___##fname(EN_ENO_PARAMS UINT param_count, TYPENAME op1, ...){\
+static inline TYPENAME ___##fname(EN_ENO_PARAMS UDINT param_count, ...){\
   va_list ap;\
   UINT i;\
+  TYPENAME op1;\
   TEST_EN(TYPENAME)\
   \
-  __VA_START (ap, op1);       /* Initialize the argument list.  */\
+  va_start (ap, param_count);   /* Initialize the argument list.  */\
+  op1 = (TYPENAME) va_arg (ap, VA_ARGS_##TYPENAME);\
   \
-  for (i = 0; i < param_count - 1; i++){\
+  for (i = 1; i < param_count; i++){\
     op1 = op1 OP (TYPENAME) va_arg (ap, VA_ARGS_##TYPENAME);\
   }\
   \
@@ -621,6 +643,15 @@ static inline TYPENAME ___##MOVE__##TYPENAME##__##TYPENAME(EN_ENO_PARAMS TYPENAM
 }
 __ANY(__iec_)
 #undef __iec_
+
+/* Clean up the arithmetic generator helpers */
+#undef __arith_static
+#undef __add
+#undef __mul
+#undef __sub
+#undef __div
+#undef __mod
+#undef __in1_anyreal_
 
 
 
@@ -765,14 +796,16 @@ __ANY_NBIT(__iec_)
   /*     XOR    */
   /**************/
 #define __xorbool_expand(fname) \
-static inline BOOL ___##fname(EN_ENO_PARAMS UINT param_count, BOOL op1, ...){ \
+static inline BOOL ___##fname(EN_ENO_PARAMS UDINT param_count, ...){ \
   va_list ap; \
   UINT i; \
+  BOOL op1; \
   TEST_EN(BOOL) \
 \
-  __VA_START (ap, op1);       /* Initialize the argument list.  */ \
+  va_start (ap, param_count);   /* Initialize the argument list.  */ \
+  op1 = (BOOL) va_arg (ap, VA_ARGS_BOOL); \
 \
-  for (i = 0; i < param_count - 1; i++){ \
+  for (i = 1; i < param_count; i++){ \
     BOOL tmp = (BOOL) va_arg (ap, VA_ARGS_BOOL); \
     op1 = (op1 && !tmp) || (!op1 && tmp); \
   } \
@@ -824,6 +857,12 @@ static inline TYPENAME ___NOT__##TYPENAME##__##TYPENAME(EN_ENO_PARAMS TYPENAME o
 __ANY_NBIT(__iec_)
 #undef __iec_
 
+/* Clean up the bit string / shift generator helpers */
+#undef __in1_anynbit_
+#undef __shift_
+#undef __xorbool_expand
+#undef __arith_expand
+
 
 
 
@@ -868,14 +907,16 @@ __ANY(__iec_)
     /**************/
 
 #define __extrem_(fname,TYPENAME, COND) \
-static inline TYPENAME ___##fname(EN_ENO_PARAMS UINT param_count, TYPENAME op1, ...){\
+static inline TYPENAME ___##fname(EN_ENO_PARAMS UDINT param_count, ...){\
   va_list ap;\
   UINT i;\
+  TYPENAME op1;\
   TEST_EN(TYPENAME)\
   \
-  __VA_START (ap, op1);       /* Initialize the argument list.  */\
+  va_start (ap, param_count);   /* Initialize the argument list.  */\
+  op1 = (TYPENAME) va_arg (ap, VA_ARGS_##TYPENAME);\
   \
-  for (i = 0; i < param_count - 1; i++){\
+  for (i = 1; i < param_count; i++){\
     TYPENAME tmp = (TYPENAME) va_arg (ap, VA_ARGS_##TYPENAME);\
     op1 = COND ? tmp : op1;\
   }\
@@ -998,7 +1039,7 @@ static inline STRING ___LIMIT__STRING__STRING__STRING__STRING(EN_ENO_PARAMS STRI
 /* The explicitly typed standard functions */
 #define __in1_anyint_(in2_TYPENAME)   __ANY_INT_1(__iec_,in2_TYPENAME)
 #define __iec_(in1_TYPENAME,in2_TYPENAME) \
-static inline in2_TYPENAME ___MUX__##in2_TYPENAME##__##in1_TYPENAME##__##in2_TYPENAME(EN_ENO_PARAMS in1_TYPENAME K, UINT param_count, ...){\
+static inline in2_TYPENAME ___MUX__##in2_TYPENAME##__##in1_TYPENAME##__##in2_TYPENAME(EN_ENO_PARAMS in1_TYPENAME K, UDINT param_count, ...){\
   va_list ap;\
   UINT i;\
   in2_TYPENAME tmp;\
@@ -1031,16 +1072,18 @@ __ANY(__in1_anyint_)
 /******************************************/
 
 #define __compare_(fname,TYPENAME, COND) \
-static inline BOOL ___##fname(EN_ENO_PARAMS UINT param_count, TYPENAME op1, ...){\
+static inline BOOL ___##fname(EN_ENO_PARAMS UDINT param_count, ...){\
   va_list ap;\
   UINT i;\
+  TYPENAME op1;\
   TEST_EN(BOOL)\
   \
-  __VA_START (ap, op1);       /* Initialize the argument list.  */\
+  va_start (ap, param_count);   /* Initialize the argument list.  */\
+  op1 = (TYPENAME) va_arg (ap, VA_ARGS_##TYPENAME);\
   DBG(#fname #TYPENAME "\n")\
   DBG_TYPE(TYPENAME, op1)\
   \
-  for (i = 0; i < param_count - 1; i++){\
+  for (i = 1; i < param_count; i++){\
     TYPENAME tmp = (TYPENAME) va_arg (ap, VA_ARGS_##TYPENAME);\
     DBG_TYPE(TYPENAME, tmp)\
     if(COND){\
@@ -1221,6 +1264,18 @@ __iec_(TIME)
 __ne_string(NE_STRING, STRING) /* The explicitly typed standard functions */
 __ne_string(NE__BOOL__STRING__STRING, STRING) /* Overloaded function */
 
+/* Clean up the selection / comparison generator helpers */
+#undef __extrem_
+#undef __STR_CMP
+#undef __in1_anyint_
+#undef __compare_
+#undef __compare_num
+#undef __compare_time
+#undef __compare_string
+#undef __ne_num
+#undef __ne_time
+#undef __ne_string
+
 
 
 
@@ -1319,7 +1374,7 @@ __ANY_INT(__mid)
     /*     CONCAT     */
     /******************/
 
-static inline STRING ___CONCAT(EN_ENO_PARAMS UINT param_count, ...){
+static inline STRING ___CONCAT(EN_ENO_PARAMS UDINT param_count, ...){
   UINT i;
   STRING res;
   va_list ap;
@@ -1422,7 +1477,8 @@ static inline STRING __replace(STRING IN1, STRING IN2, __strlen_t L, __strlen_t 
     iec_lib_memcpy(&res.body, &IN1.body , to_copy);
     P = res.len = to_copy;
 
-    to_copy = IN2.len < L ? IN2.len : L;
+    /* L counts the characters replaced in IN1; the whole of IN2 goes in */
+    to_copy = IN2.len;
 
     if( to_copy + res.len > STR_MAX_LEN )
        to_copy = STR_MAX_LEN - res.len;
@@ -1434,6 +1490,9 @@ static inline STRING __replace(STRING IN1, STRING IN2, __strlen_t L, __strlen_t 
     if( res.len <  STR_MAX_LEN && P < IN1.len)
     {
         to_copy = IN1.len - P;
+        /* IN2 may be longer than the L characters it replaces */
+        if( to_copy + res.len > STR_MAX_LEN )
+           to_copy = STR_MAX_LEN - res.len;
         iec_lib_memcpy(&res.body[res.len], &IN1.body[P] , to_copy);
         res.len += to_copy;
     }
@@ -1477,6 +1536,12 @@ static inline TYPENAME ___FIND__##TYPENAME##__STRING__STRING(EN_ENO_PARAMS STRIN
 }
 __ANY_INT(__iec_)
 #undef __iec_
+
+/* Clean up the character string generator helpers */
+#undef __genoper_1p_
+#undef __left
+#undef __right
+#undef __mid
 
 
 /*********************************************/  

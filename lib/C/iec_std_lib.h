@@ -61,6 +61,8 @@ extern TIME __CURRENT_TIME;
 // Redirected snprintf function (calls runtime's implementation)
 int iec_lib_snprintf(char *__s, size_t __maxlen, const char *__format, ...);
 int iec_lib_snprintf(char *__s, size_t __maxlen, const char *__format, ...);
+double iec_lib_strtod(const char *nptr, char **endptr);
+float iec_lib_strtof(const char *nptr, char **endptr);
 double iec_lib_acos(double x);
 double iec_lib_asin(double x);
 double iec_lib_atan(double x);
@@ -224,11 +226,9 @@ static inline void __normalize_timespec (IEC_TIMESPEC *ts) {
  *          tv_sec  = -4                 <-----  -1 *  3.8 is rounded down when converting a double to an int!
  *          tv_nsec = -7 800 000 000     <-----  -1 * (3.8 - -4)*1e9
  */
-/* NOTE: Due to the fact that the C compiler may round a tv_sec number away from zero, 
- *       the following macro may result in a timespec that is not normalized, i.e. with a tv_sec > 0, and a tv_nsec < 0 !!!!
- *       This is due to the rounding that C compiler applies when converting a (long double) to a (long int).
- *       To produce normalized timespec's we need to use floor(), but we cannot call any library functions since we want this macro to be 
- *       useable as a variable initializer.
+/* NOTE: The following macro truncates the seconds, and rounds the nanoseconds of their fraction to the nearest, as
+ *       T#0.3s is 0.29999999999999999 s: tv_sec and tv_nsec have the same sign. It calls no library function, since we want
+ *       this macro to be useable as a variable initializer.
  *       VAR x : TIME = T#3.5h; END_VAR --->  IEC_TIME x = __time_to_timespec(1, 0, 0, 0, 3.5, 0);
  */
 /*
@@ -249,14 +249,16 @@ static inline IEC_TIMESPEC __time_to_timespec(int sign, double mseconds, double 
  *       They are therefore commented out. This however means that any change to the definition of IEC_TIMESPEC may require this
  *       macro to be updated too!
  */
-#define __time_to_timespec(sign,mseconds,seconds,minutes,hours,days) \
+/* nanoseconds of the fraction of non negative seconds, rounded: 1000000000 carries to seconds */
+#define __sec_fraction_to_nsec(sec) ((int64_t)(((sec) - (int64_t)(sec))*1e9L + 0.5L))
+#define __sec_to_timespec(sign,sec) \
           ((IEC_TIMESPEC){\
-              /*tv_sec  =*/ ((int64_t)   (((sign>=0)?1:-1)*((((long double)days*24 + (long double)hours)*60 + (long double)minutes)*60 + (long double)seconds + (long double)mseconds/1e3))), \
-              /*tv_nsec =*/ ((int32_t)(( \
-                            ((long double)(((sign>=0)?1:-1)*((((long double)days*24 + (long double)hours)*60 + (long double)minutes)*60 + (long double)seconds + (long double)mseconds/1e3))) - \
-                            ((long int)   (((sign>=0)?1:-1)*((((long double)days*24 + (long double)hours)*60 + (long double)minutes)*60 + (long double)seconds + (long double)mseconds/1e3)))   \
-                            )*1e9))\
+              /*tv_sec  =*/ (sign) * ((int64_t)(sec) + __sec_fraction_to_nsec(sec) / 1000000000), \
+              /*tv_nsec =*/ (sign) * (int32_t)(__sec_fraction_to_nsec(sec) % 1000000000) \
         })
+#define __time_to_timespec(sign,mseconds,seconds,minutes,hours,days) \
+          __sec_to_timespec(((sign>=0)?1:-1), \
+              ((((long double)days*24 + (long double)hours)*60 + (long double)minutes)*60 + (long double)seconds + (long double)mseconds/1e3L))
 
 
 
@@ -275,13 +277,7 @@ static inline IEC_TIMESPEC __tod_to_timespec(double seconds, double minutes, dou
 }
 */
 #define __tod_to_timespec(seconds,minutes,hours) \
-          ((IEC_TIMESPEC){\
-              /*tv_sec  =*/ ((int64_t)   ((((long double)hours)*60 + (long double)minutes)*60 + (long double)seconds)), \
-              /*tv_nsec =*/ ((int32_t)(( \
-                            ((long double)((((long double)hours)*60 + (long double)minutes)*60 + (long double)seconds)) - \
-                            ((long int)   ((((long double)hours)*60 + (long double)minutes)*60 + (long double)seconds))   \
-                            )*1e9))\
-        })
+          __sec_to_timespec(1, ((((long double)hours)*60 + (long double)minutes)*60 + (long double)seconds))
 
 
 #define EPOCH_YEAR 1970
@@ -449,10 +445,29 @@ static inline STRING __bit_to_string(LWORD IN) {
     if(res.len > STR_MAX_LEN) res.len = STR_MAX_LEN;
     return res;
 }
+/* As few significant digits as reading the value back needs: 6.8, not
+ * 6.7999999999999998. A number of up to 15 digits (DBL_DIG) is printed back
+ * as it was read, and any LREAL is read back from 17. For a REAL, 6 (FLT_DIG)
+ * to 9. */
 static inline STRING __real_to_string(LREAL IN) {
     STRING res;
+    int digits;
     res = __INIT_STRING;
-    res.len = iec_lib_snprintf((char*)res.body, STR_MAX_LEN, "%.10g", IN);
+    for (digits = 15; ; digits++) {
+        res.len = iec_lib_snprintf((char*)res.body, STR_MAX_LEN, "%.*g", digits, IN);
+        if (digits == 17 || iec_lib_strtod((char*)res.body, NULL) == IN) break;
+    }
+    if(res.len > STR_MAX_LEN) res.len = STR_MAX_LEN;
+    return res;
+}
+static inline STRING __real32_to_string(REAL IN) {
+    STRING res;
+    int digits;
+    res = __INIT_STRING;
+    for (digits = 6; ; digits++) {
+        res.len = iec_lib_snprintf((char*)res.body, STR_MAX_LEN, "%.*g", digits, (LREAL)IN);
+        if (digits == 9 || iec_lib_strtof((char*)res.body, NULL) == IN) break;
+    }
     if(res.len > STR_MAX_LEN) res.len = STR_MAX_LEN;
     return res;
 }
@@ -544,66 +559,14 @@ static inline LINT __pstring_to_sint(STRING* IN) {
     return res;
 }
 
-static inline LREAL __iec_lib_atof(char *str, __strlen_t l) {
-    double result = 0.0;
-    double fraction = 0.0;
-    double exponent = 1;
-    int divisor = 1;
-    int sign = 1;
-    int seen_dot = 0;
-    int seen_exponent = 0;
-    char* end = str + l; // l cant be 0 if is_real
-
-    // Handle sign
-    if (*str == '-') {
-        sign = -1;
-        str++;
-    }
-    // Parse digits
-    while (str < end) {
-        if (seen_exponent) {
-            if (*str >= '0' && *str <= '9') {
-                exponent = exponent * 10 + (*str - '0');
-            }
-            str++;
-        } else if (seen_dot) {
-            // Handle exponent only if . was seen already
-            if (*str == 'E') {
-                seen_exponent = 1;
-                str++;
-                if (str < end && *str == '-') {
-                    exponent = -1;
-                    str++;
-                }
-            } else {
-                if (*str >= '0' && *str <= '9') {
-                    fraction = fraction * 10.0 + (*str - '0');
-                    divisor *= 10;
-                }
-                str++;
-            }
-        } else if (*str == '.') {
-            seen_dot = 1;
-            str++;
-        } else {
-            if (*str >= '0' && *str <= '9') {
-                result = result * 10.0 + (*str - '0');
-            }
-            str++;
-        }
-    }
-
-    result += fraction / divisor;
-    if (seen_exponent) {
-        result *= iec_lib_pow(10, exponent);
-    }
-    return (LREAL) (sign * result);
-}
-
-static inline LREAL __string_to_lreal(STRING* IN) {
+/* The number in IN as a C string in buf, without its REAL# or LREAL# prefix
+ * nor its '_', for iec_lib_strtod() and iec_lib_strtof(). NULL if IN is an
+ * integer: without prefix, dot nor exponent. */
+static inline char *__real_cstring(char *buf, STRING* IN) {
     int is_real = 0;
     char *str = (char*)IN->body;
     __strlen_t l = IN->len;
+    char *c = buf;
 
     if((l > 5
        && str[0]=='R'
@@ -625,26 +588,33 @@ static inline LREAL __string_to_lreal(STRING* IN) {
         l -= 6;
         is_real = 1;
     } else {
-        /* search the dot */
+        /* search the dot, or the exponent but in digits of 16#1E */
         __strlen_t _l = l;
-        while(_l > 0 && str[--_l] != '.');
+        int hex = l > 2 && str[0]=='1' && str[1]=='6' && str[2]=='#';
+        while(_l > 0 && str[_l - 1] != '.' && (hex || (str[_l - 1] != 'E' && str[_l - 1] != 'e'))) _l--;
         is_real = (_l != 0);
     }
 
-    if(is_real){
-        return __iec_lib_atof(str, l);
-    }else{
-        return (LREAL)__pstring_to_sint(IN);
-    }
+    if(!is_real) return NULL;
+    for (; l > 0; str++, l--) if (*str != '_') *c++ = *str;
+    *c = '\0';
+    return buf;
+}
 
-
+static inline LREAL __string_to_lreal(STRING IN) {
+    char buf[STR_MAX_LEN + 1];
+    return __real_cstring(buf, &IN) ? iec_lib_strtod(buf, NULL) : (LREAL)__pstring_to_sint(&IN);
+}
+/* strtof(): rounding to an LREAL first may not give the REAL nearest to the number */
+static inline REAL __string_to_real(STRING IN) {
+    char buf[STR_MAX_LEN + 1];
+    return __real_cstring(buf, &IN) ? iec_lib_strtof(buf, NULL) : (REAL)__pstring_to_sint(&IN);
 }
 
 
 static inline LINT  __string_to_sint(STRING IN) {return (LINT)__pstring_to_sint(&IN);}
 static inline LWORD __string_to_bit (STRING IN) {return (LWORD)__pstring_to_sint(&IN);}
 static inline ULINT __string_to_uint(STRING IN) {return (ULINT)__pstring_to_sint(&IN);}
-static inline LREAL __string_to_real(STRING IN) {return (REAL)__string_to_lreal(&IN);}
 
     /***************/
     /*   TO_TIME   */
@@ -676,10 +646,12 @@ static inline TIME __string_to_time(STRING IN){
     /* Quick hack : only transform seconds */
     /* search the dot */
     l = IN.len;
-    while(l > 0 && IN.body[--l] != '.');
+    while(l > 0 && IN.body[l - 1] != '.') l--;
     if(l != 0){
-        LREAL IN_val = __iec_lib_atof(IN.body, IN.len);
-        return  (TIME){(long)IN_val, (long)(IN_val - (LINT)IN_val)*1000000000};
+        /* rounded to the nearest nanosecond: 0.3 is 0.29999999999999999 as an LREAL */
+        LREAL ns = __string_to_lreal(IN) * 1e9;
+        LINT total = (LINT)(ns >= 0 ? ns + 0.5 : ns - 0.5);
+        return  (TIME){total / 1000000000, total % 1000000000};
     }else{
         return  (TIME){(long)__pstring_to_sint(&IN), 0};
     }
@@ -845,18 +817,6 @@ static inline LWORD __uint_to_bcd(ULINT IN){
 static inline TYPENAME __move_##TYPENAME(TYPENAME op1) {return op1;}
 __ANY(__move_)
 
-
-
-
-
-
-
 #include "iec_std_functions.h"
-
-#ifdef  DISABLE_EN_ENO_PARAMETERS
-  #include "iec_std_FB_no_ENENO.h"
-#else
-  #include "iec_std_FB.h"
-#endif
 
 #endif /* _IEC_STD_LIB_H */

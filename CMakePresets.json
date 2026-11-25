@@ -1,0 +1,63 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build-${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/build-${presetName}/install",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "native",
+      "displayName": "Linux/macOS native build",
+      "inherits": "base",
+      "generator": "Ninja",
+      "condition": { "type": "notEquals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "mingw",
+      "displayName": "Windows MinGW-w64",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": { "CMAKE_C_COMPILER": "gcc", "CMAKE_CXX_COMPILER": "g++" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "msvc",
+      "displayName": "Windows Visual Studio 2022 x64",
+      "inherits": "base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "emscripten",
+      "displayName": "WebAssembly, iec2c as an ES module for web workers and node (emsdk)",
+      "inherits": "base",
+      "generator": "Ninja",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel",
+        "BUILD_TESTING": "OFF",
+        "CMAKE_EXECUTABLE_SUFFIX_CXX": ".mjs",
+        "CMAKE_EXE_LINKER_FLAGS": "-sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createIec2c -sINVOKE_RUN=0 -sEXIT_RUNTIME=1 -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=8MB -sWASM_ASYNC_COMPILATION=0 -sENVIRONMENT=worker,node -sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=FS,callMain -lproxyfs.js --pre-js=${sourceDir}/cmake/emscripten_module_shim.js"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "native", "configurePreset": "native" },
+    { "name": "mingw", "configurePreset": "mingw" },
+    { "name": "msvc", "configurePreset": "msvc", "configuration": "Release" },
+    { "name": "emscripten", "configurePreset": "emscripten", "targets": ["iec2c"] }
+  ],
+  "testPresets": [
+    { "name": "native", "configurePreset": "native", "output": { "outputOnFailure": true } },
+    { "name": "mingw", "configurePreset": "mingw", "output": { "outputOnFailure": true } },
+    { "name": "msvc", "configurePreset": "msvc", "configuration": "Release", "output": { "outputOnFailure": true } }
+  ]
+}

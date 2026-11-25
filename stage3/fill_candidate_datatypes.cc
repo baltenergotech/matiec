@@ -66,12 +66,12 @@
 #include <list>
 #include <string>
 #include <string.h>
-#include <strings.h>
+#include "../util/strcase.hh"
 
 
-#define GET_CVALUE(dtype, symbol)             ((symbol)->const_value._##dtype.get())
-#define VALID_CVALUE(dtype, symbol)           ((symbol)->const_value._##dtype.is_valid())
-#define IS_OVERFLOW(dtype, symbol)            ((symbol)->const_value._##dtype.is_overflow())
+#define GET_CVALUE(dtype, symbol)             ((symbol)->const_value.value_##dtype.get())
+#define VALID_CVALUE(dtype, symbol)           ((symbol)->const_value.value_##dtype.is_valid())
+#define IS_OVERFLOW(dtype, symbol)            ((symbol)->const_value.value_##dtype.is_overflow())
 
 
 /* set to 1 to see debug info during execution */
@@ -627,6 +627,9 @@ void *fill_candidate_datatypes_c::handle_S_and_R_operator(symbol_c *symbol, cons
 	 *       Which of the two semantics will have to be determined by the datatype of the operand!
 	 */
 	symbol_c *prev_instruction_type, *operand_type;
+
+	/* NULL selects the Set/Reset semantics, for later stages too. The AST constructors do not initialise it! */
+	called_fb_declaration = NULL;
 
 	if (NULL == prev_il_instruction) return NULL;
 	if (NULL == il_operand)          return NULL;
@@ -2323,13 +2326,13 @@ void *fill_candidate_datatypes_c::visit(function_invocation_c *symbol) {
 	// else ERROR;  NOTE-> We support the non-standard feature of POUS with no in, out and inout parameters, so this is no longer an internal error!
 
 	generic_function_call_t fcall_param = {
-			  function_name:                symbol->function_name,
-			  nonformal_operand_list:       symbol->nonformal_param_list,
-			  formal_operand_list:          symbol->formal_param_list,
-			  POU_type:                     generic_function_call_t::POU_function,
-			  candidate_functions:          symbol->candidate_functions,
-			  called_function_declaration:  symbol->called_function_declaration,
-			  extensible_param_count:       symbol->extensible_param_count
+			  symbol->function_name,
+			  symbol->nonformal_param_list,
+			  symbol->formal_param_list,
+			  generic_function_call_t::POU_function,
+			  symbol->candidate_functions,
+			  symbol->called_function_declaration,
+			  symbol->extensible_param_count
 	};
 
 	handle_function_call(symbol, fcall_param);

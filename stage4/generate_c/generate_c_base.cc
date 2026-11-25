@@ -243,7 +243,6 @@ class generate_c_base_c: public iterator_visitor_c {
     void *print_binary_function(const char *function,
           symbol_c *l_exp,
           symbol_c *r_exp) {
-      s4o.print("___");
       s4o.print(function);
       s4o.print("(");
       l_exp->accept(*this);
@@ -294,13 +293,23 @@ class generate_c_base_c: public iterator_visitor_c {
         s4o.print("__BOOL_LITERAL(TRUE), "); // function has EN parameter, pass TRUE
       if (search_var.get_vartype(&eno_var) == search_var_instance_decl_c::output_vt)
         s4o.print("NULL, "); // function has ENO parameter, pass NULL
-      if (strcmp(function, "NE") != 0) // All comparison library functions are extensible, except for 'NE'!!
+      bool is_extensible = (strcmp(function, "NE") != 0); // All comparison library functions are extensible, except for 'NE'!!
+      if (is_extensible)
         s4o.print("2, "); // function is extensible, so must first pass the number of parameters that follow
+      if (is_extensible) print_va_args_cast(compare_type);
       l_exp->accept(*this);
       s4o.print(", ");
+      if (is_extensible) print_va_args_cast(compare_type);
       r_exp->accept(*this);
       s4o.print(")");
       return NULL;
+    }
+
+    /* In the C runtime, extensible params go through ... and va_arg() reads them as VA_ARGS_<type> */
+    void print_va_args_cast(symbol_c *type) {
+      s4o.print("(VA_ARGS_");
+      type->accept(*this);
+      s4o.print(")");
     }
 
     void *print_check_function(symbol_c *type,
@@ -793,8 +802,8 @@ void *visit(symbolic_variable_c *symbol) {
 // a non-standard extension!!
 void *visit(symbolic_constant_c *symbol) {
   TRACE("symbolic_variable_c");
-  if      (symbol->const_value. _int64.is_valid()) s4o.print(symbol->const_value. _int64.get());
-  else if (symbol->const_value._uint64.is_valid()) s4o.print(symbol->const_value._uint64.get());
+  if      (symbol->const_value. value_int64.is_valid()) s4o.print(symbol->const_value. value_int64.get());
+  else if (symbol->const_value.value_uint64.is_valid()) s4o.print(symbol->const_value.value_uint64.get());
   else ERROR;
   return NULL;
 }

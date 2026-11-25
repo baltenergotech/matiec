@@ -23,6 +23,7 @@
  */
 
 #include <limits>  // required for std::numeric_limits<XXX>
+#include <vector>  // required for std::vector<XXX>
 
 class initialization_analyzer_c: public null_visitor_c {
   public:
@@ -75,12 +76,25 @@ class generate_c_array_initialization_c: public generate_c_base_and_typeid_c {
     symbol_c* array_base_type;
     symbol_c* array_default_value;
     symbol_c* array_default_initialization;
+    bool wrap_elements;
+    /* Whether the elements stored in the array are themselves arrays. Each of them then */
+    /* needs a complete (nested) array initializer of its own, see print_element_value(). */
+    bool elements_are_arrays;
 
   private:
     int current_dimension;
     unsigned long long int array_size;
     unsigned long long int defined_values_count;
     unsigned long long int current_initialization_count;
+    /* The size of each array dimension, from outermost to innermost.       */
+    /* Used to emit properly nested braces in the C initializer, so that a   */
+    /* multi-dimensional array (whose elements are wrapped in '{...}') is    */
+    /* not flattened into a single brace level (which would make the C       */
+    /* compiler bind each element to a whole sub-array instead).             */
+    std::vector<unsigned long long int> array_dimensions;
+    /* Number of array elements already emitted. Drives the nested brace     */
+    /* transitions in print_element_value().                                 */
+    unsigned long long int emitted_count;
 
   public:
     generate_c_array_initialization_c(stage4out_c *s4o_ptr): generate_c_base_and_typeid_c(s4o_ptr) {}
@@ -90,10 +104,65 @@ class generate_c_array_initialization_c: public generate_c_base_and_typeid_c {
       array_size = 1;
       defined_values_count = 0;
       current_initialization_count = 0;
+      emitted_count = 0;
+      array_dimensions.clear();
       array_base_type = array_default_value = array_default_initialization = NULL;
-      
+      wrap_elements = false;
+      elements_are_arrays = false;
+
       current_mode = arraysize_am;
       array_specification->accept(*this);
+
+      if (array_base_type != NULL) {
+        symbol_c *elem_basetype = search_base_type_c::get_basetype_decl(array_base_type);
+        elements_are_arrays = (elem_basetype != NULL)
+            && get_datatype_info_c::is_array(elem_basetype);
+        wrap_elements = (elem_basetype != NULL)
+            && !get_datatype_info_c::is_array(elem_basetype)
+            && !get_datatype_info_c::is_structure(elem_basetype);
+      }
+    }
+
+    /* Emit the separator between the previously emitted element and the next */
+    /* one. For a single dimension array this is simply a ',', but for a      */
+    /* multi-dimensional array we must also close and re-open the braces of   */
+    /* every inner dimension that wraps around at this position.              */
+    void print_element_separator(void) {
+      if (emitted_count == 0)
+        return;
+      /* Count how many inner dimensions complete at this position. The       */
+      /* outermost dimension (index 0) is never closed here, it is closed by  */
+      /* init_array_values() at the very end.                                 */
+      int braces = 0;
+      unsigned long long int stride = 1;
+      for (int dim = (int)array_dimensions.size() - 1; dim >= 1; dim--) {
+        stride *= array_dimensions[dim];
+        if (emitted_count % stride == 0)
+          braces++;
+      }
+      for (int i = 0; i < braces; i++) s4o.print("}");
+      s4o.print(",");
+      for (int i = 0; i < braces; i++) s4o.print("{");
+    }
+
+    void print_element_value(symbol_c *value) {
+      print_element_separator();
+      if (elements_are_arrays) {
+        /* The elements are themselves arrays (e.g. ARRAY [1..2] OF arr_dint), and are stored */
+        /* in C as a nested struct, so each of them needs a complete initializer of its own.   */
+        /* Delegate it to a new generator, just like we do for structured elements, so that    */
+        /* our own element counters (and brace nesting) are left undisturbed.                  */
+        generate_c_array_initialization_c *array_initialization = new generate_c_array_initialization_c(&s4o);
+        array_initialization->init_array_size(array_base_type);
+        array_initialization->init_array_values(value);
+        delete array_initialization;
+      }
+      else {
+        if (wrap_elements) s4o.print("{0,");
+        value->accept(*this);
+        if (wrap_elements) s4o.print("}");
+      }
+      emitted_count++;
     }
 
     void set_array_default_initialisation(symbol_c *array_initialization) {
@@ -124,7 +193,11 @@ class generate_c_array_initialization_c: public generate_c_base_and_typeid_c {
     }
     
     void init_array_values(symbol_c *array_initialization) {
-      s4o.print("{{");
+      /* Open one brace for the (struct) array wrapper plus one brace for     */
+      /* each array dimension. The inner dimension braces are closed and      */
+      /* re-opened between elements by print_element_separator().             */
+      size_t open_braces = array_dimensions.size() + 1;
+      for (size_t i = 0; i < open_braces; i++) s4o.print("{");
 
       current_mode = initializationvalue_am;
       array_initialization->accept(*this);
@@ -133,14 +206,12 @@ class generate_c_array_initialization_c: public generate_c_base_and_typeid_c {
         array_default_initialization->accept(*this);
       if (defined_values_count < array_size) {
         for (unsigned long long int i = defined_values_count; i < array_size; i++) {
-          if (defined_values_count > 0)
-            s4o.print(",");
-          array_default_value->accept(*this);
+          print_element_value(array_default_value);
           defined_values_count++;
         }
       }
 
-      s4o.print("}}");
+      for (size_t i = 0; i < open_braces; i++) s4o.print("}");
     }
     
     void *visit(identifier_c *type_name) {
@@ -227,9 +298,10 @@ class generate_c_array_initialization_c: public generate_c_base_and_typeid_c {
         case arraysize_am:
           /* res = a * b; --->  Check for overflow by pre-condition: If (UINT_MAX / a) < b => overflow! */
           if ((std::numeric_limits< unsigned long long int >::max() / array_size) < symbol->dimension)
-            STAGE4_ERROR(symbol, symbol, "The array containing this subrange has a total number of elements larger than the maximum currently supported (%llu).", 
+            STAGE4_ERROR(symbol, symbol, "The array containing this subrange has a total number of elements larger than the maximum currently supported (%llu).",
                          std::numeric_limits< unsigned long long int >::max());
           array_size *= symbol->dimension;
+          array_dimensions.push_back(symbol->dimension);
           break;
         default:
           break;
@@ -247,9 +319,10 @@ class generate_c_array_initialization_c: public generate_c_base_and_typeid_c {
             if (current_initialization_count >= defined_values_count) {
               if (defined_values_count >= array_size)
                 ERROR;
-              if (defined_values_count > 0)
-                s4o.print(",");
-              symbol->get_element(i)->accept(*this);
+              if (dynamic_cast<array_initial_elements_c *>(symbol->get_element(i)) != NULL)
+                symbol->get_element(i)->accept(*this);
+              else
+                print_element_value(symbol->get_element(i));
               defined_values_count++;
             }
             else {
@@ -294,7 +367,6 @@ class generate_c_array_initialization_c: public generate_c_base_and_typeid_c {
             initial_element_count = temp_element_number;
             if (initial_element_count > 0) {
               defined_values_count++;
-              s4o.print(",");
             }
           }
           else
@@ -302,13 +374,11 @@ class generate_c_array_initialization_c: public generate_c_base_and_typeid_c {
           if (defined_values_count + initial_element_count > array_size)
             ERROR;
           for (unsigned long long int i = 0; i < initial_element_count; i++) {
-            if (i > 0)
-              s4o.print(",");
             if (symbol->array_initial_element != NULL) {
-              symbol->array_initial_element->accept(*this);
+              print_element_value(symbol->array_initial_element);
             }
             else {
-              array_default_value->accept(*this);
+              print_element_value(array_default_value);
             }
           }
           if (initial_element_count > 1)
@@ -657,6 +727,11 @@ class generate_c_structure_initialization_c: public generate_c_base_and_typeid_c
         
         initialization_analyzer_c initialization_analyzer(element_value);
             
+        symbol_c *elem_basetype = search_base_type_c::get_basetype_decl(current_element_type);
+        bool wrap_element = (elem_basetype != NULL)
+            && !get_datatype_info_c::is_array(elem_basetype)
+            && !get_datatype_info_c::is_structure(elem_basetype);
+
         if (initialization_analyzer.get_initialization_type() == initialization_analyzer_c::struct_it) {
           generate_c_structure_initialization_c *structure_initialization = new generate_c_structure_initialization_c(&s4o);
           structure_initialization->init_structure_default(current_element_type);
@@ -664,7 +739,9 @@ class generate_c_structure_initialization_c: public generate_c_base_and_typeid_c
           delete structure_initialization;
         }
         else {
+          if (wrap_element) s4o.print("{0,");
           element_value->accept(*this);
+          if (wrap_element) s4o.print("}");
         }
       }
       s4o.print("}");
@@ -1014,17 +1091,17 @@ class generate_c_vardecl_c: protected generate_c_base_and_typeid_c {
         for(int i = 0; i < list->n; i++) {
           s4o.print(s4o.indent_spaces);
           if (wanted_varformat == local_vf) {
-            if (!is_fb) {
-              s4o.print(DECLARE_VAR);
-              s4o.print("(");
-            }
-            this->current_var_type_symbol->accept(*this);
-            if (is_fb){
-              s4o.print(FB_DATASTRUCTURE_SUFFIX);
-              s4o.print(" ");
+            if (is_fb) {
+              s4o.print(DECLARE_FB);
             } else {
-              s4o.print(",");
+              symbol_c *var_basetype = search_base_type_c::get_basetype_decl(this->current_var_type_symbol);
+              bool is_array = (var_basetype != NULL) && get_datatype_info_c::is_array(var_basetype);
+              bool is_struct = (var_basetype != NULL) && get_datatype_info_c::is_structure(var_basetype);
+              s4o.print(is_array ? DECLARE_ARRAY_VAR : is_struct ? DECLARE_STRUCT_VAR : DECLARE_VAR);
             }
+            s4o.print("(");
+            this->current_var_type_symbol->accept(*this);
+            s4o.print(",");
             print_variable_prefix();
           }
           else if (wanted_varformat == localinit_vf) {
@@ -1085,8 +1162,6 @@ class generate_c_vardecl_c: protected generate_c_base_and_typeid_c {
               s4o.print(";\n");
             }
           }
-          else if (is_fb)
-            s4o.print(";\n");
           else
             s4o.print(")\n");
         }
@@ -1811,16 +1886,26 @@ void *visit(located_var_decl_c *symbol) {
   /* now to produce the c equivalent... */
   switch(wanted_varformat) {
     case local_vf:
-      s4o.print(s4o.indent_spaces);
-      s4o.print(DECLARE_LOCATED);
-      s4o.print("(");
-      this->current_var_type_symbol->accept(*this);
-      s4o.print(",");
-      if (symbol->variable_name != NULL)
-        symbol->variable_name->accept(*this);
-      else
-        symbol->location->accept(*this);
-      s4o.print(")\n");
+      {
+        symbol_c *var_basetype = search_base_type_c::get_basetype_decl(this->current_var_type_symbol);
+        bool is_array  = (var_basetype != NULL) && get_datatype_info_c::is_array(var_basetype);
+        bool is_struct = (var_basetype != NULL) && get_datatype_info_c::is_structure(var_basetype);
+        s4o.print(s4o.indent_spaces);
+        if (is_array)
+          s4o.print(DECLARE_LOCATED_ARRAY);
+        else if (is_struct)
+          s4o.print(DECLARE_LOCATED_STRUCT);
+        else
+          s4o.print(DECLARE_LOCATED);
+        s4o.print("(");
+        this->current_var_type_symbol->accept(*this);
+        s4o.print(",");
+        if (symbol->variable_name != NULL)
+          symbol->variable_name->accept(*this);
+        else
+          symbol->location->accept(*this);
+        s4o.print(")\n");
+      }
       break;
 
     case constructorinit_vf:
@@ -1983,16 +2068,25 @@ void *visit(external_declaration_c *symbol) {
   switch (wanted_varformat) {
     case local_vf:
     case localinit_vf:
-      s4o.print(s4o.indent_spaces);
-      if (is_fb)
-        s4o.print(DECLARE_EXTERNAL_FB);
-      else
-        s4o.print(DECLARE_EXTERNAL);
-      s4o.print("(");
-      this->current_var_type_symbol->accept(*this);
-      s4o.print(",");
-      symbol->global_var_name->accept(*this);
-      s4o.print(")\n");
+      {
+        symbol_c *var_basetype = search_base_type_c::get_basetype_decl(this->current_var_type_symbol);
+        bool is_array  = (var_basetype != NULL) && get_datatype_info_c::is_array(var_basetype);
+        bool is_struct = (var_basetype != NULL) && get_datatype_info_c::is_structure(var_basetype);
+        s4o.print(s4o.indent_spaces);
+        if (is_fb)
+          s4o.print(DECLARE_EXTERNAL_FB);
+        else if (is_array)
+          s4o.print(DECLARE_EXTERNAL_ARRAY);
+        else if (is_struct)
+          s4o.print(DECLARE_EXTERNAL_STRUCT);
+        else
+          s4o.print(DECLARE_EXTERNAL);
+        s4o.print("(");
+        this->current_var_type_symbol->accept(*this);
+        s4o.print(",");
+        symbol->global_var_name->accept(*this);
+        s4o.print(")\n");
+      }
       break;
 
     case constructorinit_vf:
@@ -2113,8 +2207,16 @@ void *visit(global_var_spec_c *symbol) {
       symbol->location->accept(*this);
       s4o.print(")\n");
       if (symbol->global_var_name != NULL) {
+        symbol_c *var_basetype = search_base_type_c::get_basetype_decl(this->current_var_type_symbol);
+        bool is_array  = (var_basetype != NULL) && get_datatype_info_c::is_array(var_basetype);
+        bool is_struct = (var_basetype != NULL) && get_datatype_info_c::is_structure(var_basetype);
         s4o.print(s4o.indent_spaces);
-        s4o.print(DECLARE_GLOBAL_LOCATED);
+        if (is_array)
+          s4o.print(DECLARE_GLOBAL_LOCATED_ARRAY);
+        else if (is_struct)
+          s4o.print(DECLARE_GLOBAL_LOCATED_STRUCT);
+        else
+          s4o.print(DECLARE_GLOBAL_LOCATED);
         s4o.print("(");
         this->current_var_type_symbol->accept(*this);
         s4o.print(",");
@@ -2210,20 +2312,29 @@ void *visit(global_var_list_c *symbol) {
   switch (wanted_varformat) {
     case local_vf:
     case localinit_vf:
-      for(int i = 0; i < list->n; i++) {
-        s4o.print(s4o.indent_spaces);
-        if (is_fb)
-          s4o.print(DECLARE_GLOBAL_FB);
-        else
-          s4o.print(DECLARE_GLOBAL);
-        s4o.print("(");
-        this->current_var_type_symbol->accept(*this);
-        s4o.print(",");
-        if(this->resource_name != NULL)
-            this->resource_name->accept(*this);
-        s4o.print(",");
-        list->get_element(i)->accept(*this);
-        s4o.print(")\n");
+      {
+        symbol_c *var_basetype = search_base_type_c::get_basetype_decl(this->current_var_type_symbol);
+        bool is_array  = (var_basetype != NULL) && get_datatype_info_c::is_array(var_basetype);
+        bool is_struct = (var_basetype != NULL) && get_datatype_info_c::is_structure(var_basetype);
+        for(int i = 0; i < list->n; i++) {
+          s4o.print(s4o.indent_spaces);
+          if (is_fb)
+            s4o.print(DECLARE_GLOBAL_FB);
+          else if (is_array)
+            s4o.print(DECLARE_GLOBAL_ARRAY);
+          else if (is_struct)
+            s4o.print(DECLARE_GLOBAL_STRUCT);
+          else
+            s4o.print(DECLARE_GLOBAL);
+          s4o.print("(");
+          this->current_var_type_symbol->accept(*this);
+          s4o.print(",");
+          if(this->resource_name != NULL)
+              this->resource_name->accept(*this);
+          s4o.print(",");
+          list->get_element(i)->accept(*this);
+          s4o.print(")\n");
+        }
       }
       break;
 
@@ -2249,7 +2360,6 @@ void *visit(global_var_list_c *symbol) {
           }
           print_retain();
           s4o.print(")");
-          current_varqualifier = none_vq;
 #if 0
       /* The following code would be for globalinit_vf !!
        * But it is not currently required...
